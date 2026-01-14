@@ -1,0 +1,10 @@
+.env
+.env.*
+env/
+.env/
+.vscode/
+*.code-workspace
+.history/
+*.log
+.DS_Store
+Thumbs.db
