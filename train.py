@@ -14,7 +14,7 @@ from data.dataset import DataModule
 from model.model import LLaMAForCausalLM, LLaMAModelWrapper
 from trainer.trainer import LLMTrainer
 from clearml import Task
-
+from datetime import timedelta
 
 def build_model(model_cfg: LLaMAConfig, tokenizer: Any) -> LLaMAModelWrapper:
     llama_config = LLaMAConfig(
@@ -39,12 +39,14 @@ def build_model(model_cfg: LLaMAConfig, tokenizer: Any) -> LLaMAModelWrapper:
     return wrapper
 
 def main():
-    deepspeed.init_distributed()
+    deepspeed.init_distributed(timeout=timedelta(hours=2))
+    
     global_rank = torch.distributed.get_rank()
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     torch.cuda.set_device(local_rank)
     logger = None
     task = None
+
     model_cfg = LLaMAConfig()
     data_cfg = DataConfig()
     train_cfg = TrainerConfig()
@@ -85,6 +87,10 @@ def main():
 
     model = LLaMAForCausalLM(model_cfg)
     model.model.gradient_checkpointing = True
+
+    if global_rank == 0:
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"Model Size: {total_params / 1e9:.2f}B parameters")
 
     dm = DataModule(
         dataset_name=data_cfg.dataset_name,
@@ -142,6 +148,7 @@ def main():
         train_dataloader=dm.train_dataloader(),
         val_dataloader=dm.val_dataloader(),
         trainer_cfg=train_cfg,
+        tokenizer=tokenizer,
         logger=logger,
     )
 
@@ -156,3 +163,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

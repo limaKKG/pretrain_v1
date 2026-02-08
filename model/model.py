@@ -151,6 +151,7 @@ class Attention(nn.Module):
         self,
         x: torch.Tensor,                   
         *,
+        attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,  
         is_causal: bool = True,                      
         seq_len_offset: int = 0,       
@@ -167,11 +168,27 @@ class Attention(nn.Module):
         q = q.transpose(1, 2) 
         k = k.transpose(1, 2) 
         v = v.transpose(1, 2)
+
+        # Handle attention mask for F.scaled_dot_product_attention
+        # attention_mask is expected to be [B, S] with 1 for tokens and 0 for padding.
+        # We keep causal masking ON and add a padding mask for keys.
+        attn_mask = None
+        if attention_mask is not None:
+            if attention_mask.dim() == 2:
+                # [B, S] -> [B, 1, 1, S]
+                attention_mask = attention_mask[:, None, None, :]
+            elif attention_mask.dim() != 4:
+                raise ValueError(f"Unsupported attention_mask shape: {attention_mask.shape}")
+            # Convert to additive mask: 0 for valid, -inf for masked
+            attention_mask = attention_mask.to(dtype=q.dtype)
+            attn_mask = (1.0 - attention_mask) * torch.finfo(q.dtype).min
+
         attn_out = F.scaled_dot_product_attention(
-            q, k, v,                     
+            q, k, v,
+            attn_mask=attn_mask,
             dropout_p=self.attn_dropout if self.training else 0.0,
             is_causal=is_causal
-        )  
+        )
 
         attn_out = attn_out.transpose(1, 2).contiguous().view(B, S, C)
         return self.o_proj(attn_out) 
@@ -204,13 +221,15 @@ class TransformerBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
         seq_len_offset: int = 0,
     ) -> torch.Tensor:
         h = x + self.attention(
-            self.attention_norm(x), 
-            position_ids=position_ids, 
-            is_causal=True, 
+            self.attention_norm(x),
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            is_causal=True,
             seq_len_offset=seq_len_offset
         )
         out = h + self.feed_forward(self.ffn_norm(h))
@@ -244,7 +263,7 @@ class LLaMAModel(nn.Module):
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.gradient_checkpointing = False
 
-    def forward(self, input_ids, position_ids=None, seq_len_offset=0):
+    def forward(self, input_ids, attention_mask=None, position_ids=None, seq_len_offset=0):
         h = self.embed_tokens(input_ids)
         
         for layer in self.layers:
@@ -252,12 +271,13 @@ class LLaMAModel(nn.Module):
                 h = checkpoint(
                     layer,
                     h,
+                    attention_mask,
                     position_ids,
                     seq_len_offset,
                     use_reentrant=False,
                 )
             else:
-                h = layer(h, position_ids=position_ids, seq_len_offset=seq_len_offset)
+                h = layer(h, attention_mask=attention_mask, position_ids=position_ids, seq_len_offset=seq_len_offset)
 
         return self.norm(h)
 
@@ -273,9 +293,10 @@ class LLaMAForCausalLM(nn.Module):
         self, 
         input_ids: torch.Tensor, 
         labels: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        hidden_states = self.model(input_ids, position_ids=position_ids)
+        hidden_states = self.model(input_ids, attention_mask=attention_mask, position_ids=position_ids)
         if self.config.tie_word_embeddings:
             logits = F.linear(hidden_states, self.model.embed_tokens.weight)
         else:

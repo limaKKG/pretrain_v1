@@ -36,9 +36,9 @@ class TrainerState:
 
 @dataclass
 class TrainerConfig:
-    max_steps: int = 20000
+    max_steps: int = 100000
     grad_accum_steps: int = 8 
-    eval_interval: int = 500
+    eval_interval: int = 1000
     save_interval: int = 100000
     log_interval: int = 1
     output_dir: str = "checkpoints/llama_8b_pretrain"
@@ -46,6 +46,8 @@ class TrainerConfig:
     fp16: bool = False
     bf16: bool = True 
     ds_config_path: str = "config/ds_config.json"
+    save_best_only: bool = True
+    save_final: bool = False
 
 @dataclass
 class DataConfig:

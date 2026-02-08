@@ -31,6 +31,7 @@ class JsonlStreamingDataset(IterableDataset):
 
         share: Optional[int] = None
         if self.val_take and self.val_take > 0:
+            # Ensure each shard gets at least 1 example when val_take>0
             share = (int(self.val_take) + num_shards - 1) // num_shards
 
         count = 0
@@ -42,7 +43,10 @@ class JsonlStreamingDataset(IterableDataset):
                 for line in f:
                     if not line.strip():
                         continue
-
+                    
+                    # For pretraining we keep the split simple:
+                    # - val: take first `share` examples from this shard
+                    # - train: skip first `share` examples from this shard, then stream the rest
                     if share is not None:
                         if self.is_val:
                             if count >= share:
@@ -115,6 +119,9 @@ class StreamingDatasetWrapper(IterableDataset):
         worker = get_worker_info()
         num_workers = worker.num_workers if worker is not None else 1
         worker_id = worker.id if worker is not None else 0
+
+        # Shard ONCE using (rank, worker_id) combined index.
+        # This avoids deadlocks and double-sharding issues when num_workers>0.
         combined_shards = world_size * num_workers
         combined_index = rank * num_workers + worker_id
         if combined_shards > 1:
@@ -148,6 +155,9 @@ class StreamingDatasetWrapper(IterableDataset):
         skipped_no_text = 0
         max_skips_before_error = 5000
         last_keys: Optional[List[str]] = None
+
+        # To avoid stalls / NCCL timeouts, never tokenize extremely long documents in one call.
+        # We tokenize text in small character chunks and stream tokens into fixed-size blocks.
         max_chars_per_tokenize_call = 20_000
 
         def _iter_text_chunks(text: str, max_chars: int) -> Iterable[str]:
@@ -160,6 +170,7 @@ class StreamingDatasetWrapper(IterableDataset):
             start = 0
             while start < n:
                 end = min(n, start + max_chars)
+                # Prefer splitting near whitespace/newline to reduce boundary artifacts
                 if end < n:
                     window = text[start:end]
                     cut = max(window.rfind("\n"), window.rfind(" "), window.rfind("\t"))
@@ -230,6 +241,8 @@ class StreamingDatasetWrapper(IterableDataset):
 
             skipped_no_text = 0
 
+            # Token-stream pipeline:
+            # tokenize doc chunks -> stream tokens -> insert EOS between docs
             for piece in _iter_text_chunks(text, max_chars=max_chars_per_tokenize_call):
                 if not piece:
                     continue
@@ -238,6 +251,7 @@ class StreamingDatasetWrapper(IterableDataset):
                     add_special_tokens=False,
                     return_attention_mask=False,
                 )["input_ids"]
+                # When encoding a single string, HF returns List[int], but be defensive.
                 if ids and isinstance(ids[0], list):
                     ids = ids[0]
                 for tok in ids:
@@ -335,6 +349,8 @@ class DataModule:
     def prepare(self) -> None:
         local_files = self._resolve_local_files()
         
+        # We now always use local files or throw an error if not found,
+        # completely removing the HF datasets dependency for training.
         if not local_files:
             raise RuntimeError(
                 f"No local data files found in {self.data_root}. "
