@@ -1,0 +1,12 @@
+# Editor / IDE
+.vscode/
+.history/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore all YAML files
+*.yml
